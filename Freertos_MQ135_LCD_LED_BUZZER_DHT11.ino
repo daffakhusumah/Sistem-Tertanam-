@@ -2,8 +2,9 @@
 #include <LiquidCrystal_I2C.h>
 #include <Arduino_FreeRTOS.h>
 #include <semphr.h>
+#include <queue.h>
 
-LiquidCrystal_I2C lcd(0x3F,20,4);
+LiquidCrystal_I2C lcd(0x3F, 20, 4);
 
 int redLed = 10;
 int greenLed = 13;
@@ -18,29 +19,35 @@ volatile bool showTemperature = false;  // Flag to switch between smoke level an
 
 SemaphoreHandle_t lcdSemaphore;
 SemaphoreHandle_t serialSemaphore;
+QueueHandle_t mailbox;
 
 void setup() {
     pinMode(redLed, OUTPUT);
+    pinMode(greenLed, OUTPUT);
     pinMode(buzzer, OUTPUT);
     pinMode(smokeA0, INPUT);
     pinMode(tempPin, INPUT);
-    pinMode(buttonPin, INPUT_PULLUP);  // Use internal pull-up resistor
+    pinMode(buttonPin, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(buttonPin), changeDisplay, FALLING);
     Serial.begin(9600);
     lcd.init();
     lcd.backlight();
-    lcd.begin(16,2);
+    lcd.begin(20, 4);
 
-    // Create semaphores
     lcdSemaphore = xSemaphoreCreateMutex();
     serialSemaphore = xSemaphoreCreateMutex();
+    mailbox = xQueueCreate(1, sizeof(int));
 
-    // Creating tasks
+    if (mailbox == NULL) {
+        Serial.println("Error creating the mailbox");
+        return;
+    }
+
     xTaskCreate(ReadSensorTask, "ReadSensor", 128, NULL, 1, NULL);
     xTaskCreate(DisplayTask, "Display", 128, NULL, 2, NULL);
     xTaskCreate(AlertTask, "Alert", 128, NULL, 3, NULL);
+    xTaskCreate(MailboxTask, "Mailbox", 128, NULL, 1, NULL);
 
-    // Start the scheduler
     vTaskStartScheduler();
 }
 
@@ -49,14 +56,14 @@ void loop() {
 }
 
 void changeDisplay() {
-  showTemperature = !showTemperature;
+    showTemperature = !showTemperature;
 }
 
 void ReadSensorTask(void *pvParameters) {
     for (;;) {
         analogSensorValue = analogRead(smokeA0);
+        xQueueSend(mailbox, &analogSensorValue, portMAX_DELAY);
 
-        // Access serial with semaphore
         if (xSemaphoreTake(serialSemaphore, (TickType_t)10) == pdTRUE) {
             Serial.print("Pin A0: ");
             Serial.println(analogSensorValue);
@@ -71,62 +78,72 @@ void DisplayTask(void *pvParameters) {
     for (;;) {
         if (xSemaphoreTake(lcdSemaphore, (TickType_t)10) == pdTRUE) {
             lcd.clear();
-            if(showTemperature) {
+            if (showTemperature) {
                 int tempReading = analogRead(tempPin);
-                float temperature = tempReading * 5.0 * 100.0 / 1624.0;
+                float temperature = tempReading * 5.0 * 100.0 / 1024.0;
                 lcd.print("Temperature:");
                 lcd.setCursor(0, 1);
                 lcd.print(temperature, 2);
                 lcd.print(" C");
             } else {
                 lcd.print("Smoke Level:");
-                int scaledValue = map(analogSensorValue, 0, 1023, 0, 100); // Scale the value to 0-100
-                lcd.setCursor(0, 1);  // Move cursor to second line
+                int scaledValue = map(analogSensorValue, 0, 1023, 0, 100);
+                lcd.setCursor(0, 1);
                 lcd.print(scaledValue);
-                lcd.print("%   ");  // Print percentage and clear any previous characters
+                lcd.print("%   ");
             }
             xSemaphoreGive(lcdSemaphore);
         }
-        vTaskDelay(500 / portTICK_PERIOD_MS); // Delay to allow for easier reading
+        vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 }
 
-
 void AlertTask(void *pvParameters) {
     for (;;) {
-        if (analogSensorValue - 400 > sensorThres) {
+        if (analogSensorValue > sensorThres) {
             digitalWrite(redLed, HIGH);
-            
+            tone(buzzer, 1000, 200);
+
             if (xSemaphoreTake(lcdSemaphore, (TickType_t)10) == pdTRUE) {
                 lcd.setCursor(0, 2);
                 lcd.print("Alert....!!!");
                 xSemaphoreGive(lcdSemaphore);
             }
 
-            // Serial monitor printing
             if (xSemaphoreTake(serialSemaphore, (TickType_t)10) == pdTRUE) {
                 Serial.println("Alert....!!!");
                 xSemaphoreGive(serialSemaphore);
             }
 
-            digitalWrite(greenLed, LOW);  // Turn off the green LED
-            tone(buzzer, 1000, 200);
+            digitalWrite(greenLed, LOW);
         } else {
             digitalWrite(redLed, LOW);
-            digitalWrite(greenLed, HIGH);  // Turn on the green LED at full brightness
-            
+            digitalWrite(greenLed, HIGH);
+
             if (xSemaphoreTake(lcdSemaphore, (TickType_t)10) == pdTRUE) {
                 lcd.setCursor(0, 2);
                 lcd.print(".....Normal.....");
                 xSemaphoreGive(lcdSemaphore);
             }
 
-            // Serial monitor printing
             if (xSemaphoreTake(serialSemaphore, (TickType_t)10) == pdTRUE) {
                 Serial.println(".....Normal.....");
                 xSemaphoreGive(serialSemaphore);
             }
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+void MailboxTask(void *pvParameters) {
+    int receivedValue;
+    for (;;) {
+        if (xQueueReceive(mailbox, &receivedValue, portMAX_DELAY) == pdTRUE) {
+            if (xSemaphoreTake(serialSemaphore, (TickType_t)10) == pdTRUE) {
+                Serial.print("Mailbox received: ");
+                Serial.println(receivedValue);
+                xSemaphoreGive(serialSemaphore);
+            }
+        }
     }
 }
