@@ -1,7 +1,7 @@
 # Sistem-Tertanam-
 
 Flowchart
-![image](https://github.com/daffakhusumah/Sistem-Tertanam-/blob/main/Finite%20State%20Machine.png)
+![image](https://raw.githubusercontent.com/daffakhusumah/Sistem-Tertanam-/main/FSM.png)
 
 
 
